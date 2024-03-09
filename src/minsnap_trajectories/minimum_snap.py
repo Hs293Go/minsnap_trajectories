@@ -48,6 +48,40 @@ class PiecewisePolynomialTrajectory(NamedTuple):
     coefficients: np.ndarray
 
 
+class RotorDragParameters(NamedTuple):
+    cp: float
+    dh: float
+    dv: float
+
+
+class RobotTrajectory(NamedTuple):
+    state: np.ndarray
+    input: np.ndarray
+
+
+class QuadrotorTrajectory(RobotTrajectory):
+
+    @property
+    def position(self):
+        return self.state[:, 0:3]
+
+    @property
+    def attitude(self):
+        return self.state[:, 3:7]
+
+    @property
+    def velocity(self):
+        return self.state[:, 7:10]
+
+    @property
+    def thrust(self):
+        return self.input[:, 0]
+
+    @property
+    def body_rates(self):
+        return self.input[:, 1:4]
+
+
 def compute_trajectory_derivatives(polys, t_sample, order):
     t_ref, _, coeffs = polys
 
@@ -55,7 +89,7 @@ def compute_trajectory_derivatives(polys, t_sample, order):
     if order > n_cfs - 1:
         raise ValueError(f"Kinematic order {order} > polynomial degree {n_cfs - 1}")
     len_traj = t_sample.size
-    kinematic_refs = np.zeros((order, len_traj, dim), dtype=np.float64)
+    trajectory_derivatives = np.zeros((order, len_traj, dim), dtype=np.float64)
 
     def find_piece(t):
         if not t_ref[0] <= t <= t_ref[-1]:
@@ -69,8 +103,128 @@ def compute_trajectory_derivatives(polys, t_sample, order):
         for k, t in enumerate(t_sample):
             piece, segment_time = find_piece(t)
 
-            kinematic_refs[r, k, :] = _nd_polyvals(piece, segment_time, r)
-    return kinematic_refs
+            trajectory_derivatives[r, k, :] = _nd_polyvals(piece, segment_time, r)
+    return trajectory_derivatives
+
+
+def flat_output_to_quadrotor_trajectory(
+    trajectory_derivatives,
+    vehicle_mass,
+    yaw,
+    yaw_rate,
+    drag_params=None,
+):
+    grav_vector = np.array([0.0, 0.0, 9.81])
+    trajectory_derivatives = np.asarray(trajectory_derivatives, dtype=np.float64)
+    trajectory_derivatives = np.atleast_3d(trajectory_derivatives)
+
+    n_ders, len_traj, n_dims = trajectory_derivatives.shape
+
+    if n_dims != 3:
+        raise ValueError(
+            f"Incorrect dimensions for quadrotor trajectory: {n_dims} != 3"
+        )
+
+    # This should be guaranteed if this function is forwarded to from
+    # compute_quadrotor_trajectory
+    assert n_ders in (3, 4)
+
+    vel = np.atleast_2d(trajectory_derivatives[1, ...])
+    acc = np.atleast_2d(trajectory_derivatives[2, ...])
+    jer = np.atleast_2d(trajectory_derivatives[3, ...])
+
+    attitude = np.empty((len_traj, 4), dtype=np.float64)
+    inputs = np.empty((len_traj, 4), dtype=np.float64)
+    if drag_params is not None:
+        cp_term = np.sqrt(np.sum(vel * vel, axis=1))
+        w_term = 1.0 + drag_params.cp * cp_term
+        v_dot_a = np.sum(vel * acc, axis=1)
+        dw_term = drag_params.cp * v_dot_a / cp_term
+
+        dw = w_term * acc + dw_term * vel
+        w = w_term * vel
+        dh_over_m = drag_params.dh / vehicle_mass
+
+        z = acc + dh_over_m * w + grav_vector
+        z_nrm = np.linalg.norm(z, axis=1, keepdims=True)
+        z /= z_nrm
+
+        dz = -np.cross(z, np.cross(z, jer + dh_over_m * dw, axis=0), axis=0) / z_nrm
+        inputs[0, :] = np.sum(
+            z * (vehicle_mass * (acc + grav_vector) + drag_params.dv * w), axis=0
+        )
+    else:
+        z = acc + grav_vector
+        z_nrm = np.linalg.norm(z, axis=1, keepdims=True)
+        z /= z_nrm
+
+        dz = -np.cross(z, np.cross(z, jer, axis=1), axis=1) / z_nrm
+        inputs[:, 0] = np.sum(z * (vehicle_mass * (acc + grav_vector)), axis=1)
+
+    tilt_den = np.sqrt(2.0 * (1.0 + z[:, 2]))
+    tilt0 = 0.5 * tilt_den
+    tilt1 = -z[:, 1] / tilt_den
+    tilt2 = z[:, 0] / tilt_den
+    c_half_psi = np.cos(0.5 * yaw)
+    s_half_psi = np.sin(0.5 * yaw)
+    attitude = np.column_stack(
+        [
+            tilt1 * c_half_psi + tilt2 * s_half_psi,
+            tilt2 * c_half_psi - tilt1 * s_half_psi,
+            tilt0 * s_half_psi,
+            tilt0 * c_half_psi,
+        ]
+    )
+    c_psi = np.cos(yaw)
+    s_psi = np.sin(yaw)
+    omg_den = z[:, 2] + 1.0
+    omg_term = dz[:, 2] / omg_den
+    inputs[:, 1:4] = np.column_stack(
+        [
+            (
+                dz[:, 0] * s_psi
+                - dz[:, 1] * c_psi
+                - (z[:, 0] * s_psi - z[:, 1] * c_psi) * omg_term
+            ),
+            (
+                dz[:, 0] * c_psi
+                + dz[:, 1] * s_psi
+                - (z[:, 0] * c_psi + z[:, 1] * s_psi) * omg_term
+            ),
+            (z[:, 1] * dz[:, 0] - z[:, 0] * dz[:, 1]) / omg_den + yaw_rate,
+        ]
+    )
+
+    return attitude, inputs
+
+
+def compute_quadrotor_trajectory(
+    polys, t_sample, vehicle_mass, yaw=None, yaw_rate=None, drag_params=None
+):
+
+    trajectory_derivatives = compute_trajectory_derivatives(polys, t_sample, 4)
+    len_traj = len(t_sample)
+    if yaw is not None:
+        if yaw == "velocity":
+            yaw = np.arctan2(
+                trajectory_derivatives[1, :, 1], trajectory_derivatives[1, :, 0]
+            )
+        yaw = np.broadcast_to(yaw, [len_traj])
+    else:
+        yaw = np.zeros(len_traj)
+
+    if yaw_rate is not None:
+        yaw_rate = np.broadcast_to(yaw_rate, [len_traj])
+    else:
+        yaw_rate = np.zeros(len_traj)
+
+    attitudes, inputs = flat_output_to_quadrotor_trajectory(
+        trajectory_derivatives, vehicle_mass, yaw, yaw_rate, drag_params
+    )
+    positions = trajectory_derivatives[0, :, :]
+    velocities = trajectory_derivatives[1, :, :]
+
+    return QuadrotorTrajectory(np.hstack([positions, attitudes, velocities]), inputs)
 
 
 def generate_trajectories(
