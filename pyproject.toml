@@ -1,0 +1,14 @@
+[project]
+name = "minsnap_trajectories"
+version = "0.0.1"
+description = "Simple minimum-snap trajectory generator"
+readme = "README.md"
+authors = [{ name = "H S Helson Go", email = "hei.go@mail.utoronto.ca" }]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = ["numpy", "scipy"]
+optional-dependencies = { "dev" = ["pytest"] }
+
+[tool.pytest.ini_options]
+pythonpath = "src"
+filterwarnings = "ignore::DeprecationWarning"
