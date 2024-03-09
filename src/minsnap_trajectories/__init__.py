@@ -1,10 +1,10 @@
 from .minimum_snap import (
     PiecewisePolynomialTrajectory,
     QuadrotorTrajectory,
-    Reference,
     RotorDragParameters,
+    Waypoint,
     compute_quadrotor_trajectory,
     compute_trajectory_derivatives,
     flat_output_to_quadrotor_trajectory,
-    generate_trajectories,
+    generate_trajectory,
 )
