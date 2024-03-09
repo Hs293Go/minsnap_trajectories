@@ -66,7 +66,9 @@ def test_canned_symao_simple(test_directory):
     data = io.loadmat(test_directory / "data/symao_simple.mat")
     # Cannot directly test polynomial coefficients since symao's version has no time
     # normalization
-    kinematic_references = ms.to_kinematic_references(polys, data["sample_time"], 4)
+    kinematic_references = ms.compute_trajectory_derivatives(
+        polys, data["sample_time"], 4
+    )
 
     # Lower tolerance since MATLAB quadprog behaves differently from
     # scipy.optimize.minimize
@@ -96,7 +98,9 @@ def test_canned_symao_closed_form(test_directory):
     # normalization
 
     data = io.loadmat(test_directory / "data/symao_closed_form.mat")
-    kinematic_references = ms.to_kinematic_references(polys, data["sample_time"], 4)
+    kinematic_references = ms.compute_trajectory_derivatives(
+        polys, data["sample_time"], 4
+    )
 
     assert kinematic_references == pytest.approx(data["kinematic_references"])
 
@@ -130,7 +134,9 @@ def test_canned_icsl_jeon(test_directory):
     )
 
     data = io.loadmat(test_directory / "data/icsl_jeon_3d.mat")
-    kinematic_references = ms.to_kinematic_references(polys, data["sample_time"], 4)
+    kinematic_references = ms.compute_trajectory_derivatives(
+        polys, data["sample_time"], 4
+    )
     assert kinematic_references == pytest.approx(
         data["kinematic_references"], abs=1e-5, rel=1e-5
     )

@@ -48,18 +48,7 @@ class PiecewisePolynomialTrajectory(NamedTuple):
     coefficients: np.ndarray
 
 
-def _nd_polyvals(coeffs, time, r):
-    n_cfs = coeffs.shape[0]  # Coefficients per-piece
-    if r == 0:
-        return (time ** np.arange(0, n_cfs)) @ coeffs
-    n_seq = np.arange(r, n_cfs, dtype=np.int64)
-    r_seq = np.arange(0, r, dtype=np.int64)
-    return time ** (n_seq - r) @ (
-        np.prod(n_seq[None, :] - r_seq[:, None], axis=0)[..., None] * coeffs[n_seq, :]
-    )
-
-
-def to_kinematic_references(polys: PiecewisePolynomialTrajectory, t_sample, order: int):
+def compute_trajectory_derivatives(polys, t_sample, order):
     t_ref, _, coeffs = polys
 
     _, n_cfs, dim = coeffs.shape
@@ -84,33 +73,11 @@ def to_kinematic_references(polys: PiecewisePolynomialTrajectory, t_sample, orde
     return kinematic_refs
 
 
-def _parse_references(references):
-    len_traj = len(references)
-    t_ref = []
-
-    refs = []
-    for idx, it in enumerate(references):
-        t_ref.append(it.time)
-        pos = it.position
-        dim = len(pos)
-        placeholder = (
-            np.zeros(dim) if idx in (0, len_traj - 1) else np.full([dim], np.nan)
-        )
-
-        vel = it.velocity if it.velocity is not None else placeholder
-        acc = it.acceleration if it.acceleration is not None else placeholder
-
-        refs.append(np.array([pos, vel, acc]))
-
-    refs = np.asarray(refs)
-
-    return np.asarray(t_ref), refs
-
-
 def generate_trajectories(
     references,
     degree,
     derivative_weights,
+    *,
     continuity_order=3,
     algorithm="closed-form",
     optimize_options=None,
@@ -150,10 +117,44 @@ def generate_trajectories(
     return PiecewisePolynomialTrajectory(t_ref, durations, polys)
 
 
+def _nd_polyvals(coeffs, time, r):
+    n_cfs = coeffs.shape[0]  # Coefficients per-piece
+    if r == 0:
+        return (time ** np.arange(0, n_cfs)) @ coeffs
+    n_seq = np.arange(r, n_cfs, dtype=np.int64)
+    r_seq = np.arange(0, r, dtype=np.int64)
+    return time ** (n_seq - r) @ (
+        np.prod(n_seq[None, :] - r_seq[:, None], axis=0)[..., None] * coeffs[n_seq, :]
+    )
+
+
+def _parse_references(references):
+    len_traj = len(references)
+    t_ref = []
+
+    refs = []
+    for idx, it in enumerate(references):
+        t_ref.append(it.time)
+        pos = it.position
+        dim = len(pos)
+        placeholder = (
+            np.zeros(dim) if idx in (0, len_traj - 1) else np.full([dim], np.nan)
+        )
+
+        vel = it.velocity if it.velocity is not None else placeholder
+        acc = it.acceleration if it.acceleration is not None else placeholder
+
+        refs.append(np.array([pos, vel, acc]))
+
+    refs = np.asarray(refs)
+
+    return np.asarray(t_ref), refs
+
+
 def _solve_closed_form(
     refs,
     durations,
-    poly_dim: PolynomialSize,
+    poly_dim,
     derivative_weights,
     r_cts,
     optimize_options,
@@ -170,22 +171,22 @@ def _solve_closed_form(
             "Optimizer options will be ignored"
         )
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
-    Q_all = np.zeros((n_vars, n_vars))
+    Q = np.zeros((n_vars, n_vars))
     for r, c_r in enumerate(derivative_weights):
-        Q_all += c_r * la.block_diag(*_compute_Q(poly_dim, r, durations))
+        Q += c_r * la.block_diag(*_compute_Q(poly_dim.n_cfs, r, durations))
 
-    polys = np.zeros(poly_dim)
-    # compute A (poly_dim.cont_order*2*poly_dim.n_poly) *
-    # (poly_dim.n_cfs*poly_dim.n_poly) 1:p  2:pv  3:pva  4:pvaj  5:pvajs
+    poly_coeffs = np.zeros(poly_dim)
     A = np.zeros((r_cts * 2 * poly_dim.n_poly, poly_dim.n_cfs * poly_dim.n_poly))
     for i in range(poly_dim.n_poly):
         s = np.s_[poly_dim.n_cfs * i : poly_dim.n_cfs * (i + 1)]
         for r in range(r_cts):
-            A[r_cts * 2 * i + r, s] = _compute_tvec(poly_dim, r, 0) / durations[i] ** r
-            A[r_cts * (2 * i + 1) + r, s] = (
-                _compute_tvec(poly_dim, r, 1) / durations[i] ** r
+            A[r_cts * 2 * i + r, s] = (
+                _compute_tvec(poly_dim.n_cfs, r, 0) / durations[i] ** r
             )
-    # compute M
+            A[r_cts * (2 * i + 1) + r, s] = (
+                _compute_tvec(poly_dim.n_cfs, r, 1) / durations[i] ** r
+            )
+
     M = np.zeros((poly_dim.n_poly * 2 * r_cts, r_cts * (poly_dim.n_poly + 1)))
     for i in range(poly_dim.n_poly):
         s1 = np.s_[2 * r_cts * i : 2 * r_cts * (i + 1)]
@@ -202,10 +203,9 @@ def _solve_closed_form(
     C = np.hstack([C[:, fix_idx], C[:, free_idx]])
 
     AiMC = la.lstsq(A, M @ C)[0]
-    R = AiMC.T @ Q_all @ AiMC
+    R = AiMC.T @ Q @ AiMC
 
     n_fix = fix_idx.size
-    # Rff = R[:n_fix, :n_fix]
     Rpp = R[n_fix:, n_fix:]
     Rfp = R[:n_fix, n_fix:]
 
@@ -213,22 +213,20 @@ def _solve_closed_form(
 
         ref = refs[..., d]
         df = np.concatenate([ref[:, 0], ref[0, 1:3], ref[-1, 1:3]])
-        new_var = Rfp.T @ df
-        dp = -la.solve(Rpp, new_var)
+        dp = -la.solve(Rpp, Rfp.T @ df)
 
-        p = np.reshape(AiMC @ np.concatenate([df, dp]), poly_dim[0:2])
-
-        polys[:, :, d] = (1.0 / durations[..., None]) ** np.arange(
+        coeffs = np.reshape(AiMC @ np.concatenate([df, dp]), poly_dim[0:2])
+        poly_coeffs[:, :, d] = (1.0 / durations[..., None]) ** np.arange(
             0, poly_dim.n_cfs
-        ) * p
+        ) * coeffs
 
-    return polys
+    return poly_coeffs
 
 
 def _solve_constrained(
     refs,
     durations,
-    poly_dim: PolynomialSize,
+    poly_dim,
     derivative_weights,
     r_cts,
     optimize_options,
@@ -238,11 +236,11 @@ def _solve_constrained(
     if optimize_options is not None:
         opts.update(optimize_options)
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
-    Q_all = np.zeros((n_vars, n_vars))
+    Q = np.zeros((n_vars, n_vars))
     for r, c_r in enumerate(derivative_weights):
-        Q_all += c_r * la.block_diag(*_compute_Q(poly_dim, r, durations))
+        Q += c_r * la.block_diag(*_compute_Q(poly_dim.n_cfs, r, durations))
 
-    polys = np.zeros(poly_dim)
+    poly_coeffs = np.zeros(poly_dim)
     Aeq_1, beq_1 = _compute_continuity_constraints(poly_dim, durations, r_cts)
     for d in range(poly_dim.dim):
         Aeq_0, beq_0 = _compute_dynamical_constraints(
@@ -254,35 +252,35 @@ def _solve_constrained(
 
         constr = optimize.LinearConstraint(Aeq, beq, beq)  # type: ignore
         soln = optimize.minimize(
-            lambda x: (x @ Q_all @ x) / 2,
+            lambda x: (x @ Q @ x) / 2,
             np.zeros(n_vars),
             constraints=constr,
-            jac=lambda x: Q_all @ x,
+            jac=lambda x: Q @ x,
             **opts,
         )
-        P = np.reshape(soln.x, poly_dim[0:2])
-        polys[:, :, d] = (1.0 / durations[..., None]) ** np.arange(
+        coeffs = soln.x.reshape(poly_dim[0:2])
+        poly_coeffs[:, :, d] = (1.0 / durations[..., None]) ** np.arange(
             0, poly_dim.n_cfs
-        ) * P
-    return polys
+        ) * coeffs
+    return poly_coeffs
 
 
-def _compute_continuity_constraints(poly_dim: PolynomialSize, durations, r_cts):
+def _compute_continuity_constraints(poly_dim, durations, r_cts):
 
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
-    Aeqs = np.zeros(((poly_dim.n_poly - 1) * r_cts, n_vars))
-    beqs = np.zeros((poly_dim.n_poly - 1) * r_cts)
+    Aeq = np.zeros(((poly_dim.n_poly - 1) * r_cts, n_vars))
+    beq = np.zeros((poly_dim.n_poly - 1) * r_cts)
     for i in range(poly_dim.n_poly - 1):
         s = np.s_[poly_dim.n_cfs * i : poly_dim.n_cfs * (i + 2)]
         for r in range(r_cts):
-            tvec_l = _compute_tvec(poly_dim, r, 1) / durations[i] ** r
-            tvec_r = _compute_tvec(poly_dim, r, 0) / durations[i + 1] ** r
-            Aeqs[r_cts * i + r, s] = np.concatenate([tvec_l, -tvec_r])
+            tvec_l = _compute_tvec(poly_dim.n_cfs, r, 1) / durations[i] ** r
+            tvec_r = _compute_tvec(poly_dim.n_cfs, r, 0) / durations[i + 1] ** r
+            Aeq[r_cts * i + r, s] = np.concatenate([tvec_l, -tvec_r])
 
-    return Aeqs, beqs
+    return Aeq, beq
 
 
-def _compute_dynamical_constraints(poly_dim: PolynomialSize, refs, durations):
+def _compute_dynamical_constraints(poly_dim, refs, durations):
 
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
     n_constrain_orders = np.count_nonzero(~np.isnan(refs), axis=1)
@@ -295,16 +293,16 @@ def _compute_dynamical_constraints(poly_dim: PolynomialSize, refs, durations):
         s = np.s_[poly_dim.n_cfs * idx : poly_dim.n_cfs * (1 + idx)]
         for r in range(n_constrain_orders[i]):
             Aeq[row_its[i] + r, s] = (
-                _compute_tvec(poly_dim, r, tau) / durations[idx] ** r
+                _compute_tvec(poly_dim.n_cfs, r, tau) / durations[idx] ** r
             )
             beq[row_its[i] + r] = refs[i, r]
     return Aeq, beq
 
 
-def _compute_Q(poly_dim: PolynomialSize, r, tau):
-    Q = np.zeros((len(tau), poly_dim.n_cfs, poly_dim.n_cfs))
+def _compute_Q(n_cfs, r, tau):
+    Q = np.zeros((len(tau), n_cfs, n_cfs))
 
-    i, l = np.meshgrid(*[np.arange(r, poly_dim.n_cfs)] * 2, sparse=True)
+    i, l = np.meshgrid(*[np.arange(r, n_cfs)] * 2, sparse=True)
     m_seq = np.arange(0, r)[:, None, None]
     k = -2 * r + 1
     Q[:, i, l] = (
@@ -315,9 +313,9 @@ def _compute_Q(poly_dim: PolynomialSize, r, tau):
     return Q
 
 
-def _compute_tvec(poly_dim: PolynomialSize, r, tau):
-    tvec = np.zeros(poly_dim.n_cfs)
-    n_seq = np.arange(r, poly_dim.n_cfs)
+def _compute_tvec(n_cfs, r, tau):
+    tvec = np.zeros(n_cfs)
+    n_seq = np.arange(r, n_cfs)
     r_seq = np.arange(0, r)[:, None]
     tvec[n_seq] = np.prod(n_seq - r_seq, axis=0) * tau ** (n_seq - r)
     return tvec
