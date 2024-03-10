@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "minsnap_trajectories"
 version = "0.0.1"
@@ -6,12 +10,26 @@ readme = "README.md"
 authors = [{ name = "H S Helson Go", email = "hei.go@mail.utoronto.ca" }]
 license = { text = "MIT" }
 requires-python = ">=3.8"
+keywords = [
+  "trajectory generation",
+  "path planning",
+  "minimum snap",
+  "differential flatness",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
 dependencies = ["numpy", "scipy"]
 optional-dependencies = { "dev" = ["pytest", "black", "isort"] }
-
 [tool.pytest.ini_options]
 pythonpath = "src"
 filterwarnings = "ignore::DeprecationWarning"
 
 [tool.isort]
 profile = "black"
+
+[project.urls]
+Homepage = "https://github.com/Hs293Go/minsnap_trajectories"
