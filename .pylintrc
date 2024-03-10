@@ -1,0 +1,5 @@
+[FORMAT]
+good-names=A,C,M,R,Q,Aeq,Aeq_0,AiMC,Aeq_1,Rpp,Rfp
+
+[MESSAGES CONTROL]
+disable=C0115,C0116,R0913,R0914

@@ -125,7 +125,7 @@ def compute_trajectory_derivatives(polys, t_sample, order):
 
     def find_piece(t):
         if not t_ref[0] <= t <= t_ref[-1]:
-            warnings.warn("Query point is outside of bounds. Clamping")
+            warnings.warn("Query point is outside of bounds. Clamping", stacklevel=2)
             t = np.clip(t, t_ref[0], t_ref[-1])
         idx = np.flatnonzero(t >= t_ref[:-1])[-1]
         tau = t - t_ref[idx]
@@ -347,7 +347,7 @@ def _parse_references(references, r_cts):
         dim = len(it.position)
 
         if any(k > r_cts for k in it.keys()):
-            warnings.warn("Too many derivatives specified")
+            warnings.warn("Too many derivatives specified", stacklevel=2)
         # velocity/acceleration are constrained to zero at initial or terminal points;
         # Otherwise they are unconstrained as signalled by nans
         # Higher-order derivatives are always unconstrained unless specified
@@ -383,7 +383,8 @@ def _solve_closed_form(
     if optimize_options is not None:
         warnings.warn(
             "Solving the trajectory generation problem in closed form."
-            "Optimizer options will be ignored"
+            "Optimizer options will be ignored",
+            stacklevel=2,
         )
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
     Q = np.zeros((n_vars, n_vars))
@@ -417,7 +418,9 @@ def _solve_closed_form(
     free_idx = np.setdiff1d(np.arange(num_d), fix_idx)
     C = np.hstack([C[:, fix_idx], C[:, free_idx]])
 
-    AiMC = la.lstsq(A, M @ C)[0]
+    res = la.lstsq(A, M @ C)
+    assert res is not None
+    AiMC = res[0]
     R = AiMC.T @ Q @ AiMC
 
     n_fix = fix_idx.size
@@ -510,10 +513,10 @@ def _compute_dynamical_constraints(poly_dim, refs, durations):
     return Aeq, beq
 
 
-def _compute_Q(n_cfs, r, tau):
+def _compute_Q(n_cfs, r, tau):  # pylint: disable=C0103
     Q = np.zeros((len(tau), n_cfs, n_cfs))
 
-    i, l = np.meshgrid(*[np.arange(r, n_cfs)] * 2, sparse=True)
+    i, l = np.meshgrid(*[np.arange(r, n_cfs)] * 2, sparse=True)  # NOQA
     m_seq = np.arange(0, r)[:, None, None]
     k = -2 * r + 1
     Q[:, i, l] = (
