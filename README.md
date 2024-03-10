@@ -22,11 +22,19 @@ In *Int. Symposium on Robotics Research*, 2013
 
 ## Get Started
 
-Note that this package is imported as follows
+### Preliminaries
+
+Use the following convention to import this package
 
 ``` python
 import minsnap_trajectories as ms
 ```
+
+Derivatives on position are numbered from 0, as shown below
+
+| Orders (# of derivatives) |    0     |    1     |      2       |  3   |  4   |
+| ------------------------- | -------- | -------- | ------------ | ---- | ---- |
+| Quantity                  | Position | Velocity | Acceleration | Jerk | Snap |
 
 ### TLDR
 
@@ -84,7 +92,7 @@ Sample the polynomial trajectory to get position, velocity, acceleration (or hig
 
 ``` python
 t = np.linspace(0, 16, 100)
-#  Sample up to the 3rd order (acceleration) -----v
+#  Sample up to the 3rd order (Jerk) -----v
 pva = ms.compute_trajectory_derivatives(polys, t, 3)
 position = pva[0, ...]
 velocity = pva[1, ...]
@@ -119,5 +127,5 @@ Existing tests show that this piecewise polynomial planner behaves identically t
 Until more extensive tests are available, use the following parameters in polynomial planning (they are the defaults)
 
 - `degree`: From 5 to 15
-- `minimized_orders`: 5 (Minimum snap)
+- `minimized_orders`: 4 (Minimum snap)
 - `continuous_orders`: 3 (Just keep position/velocity/acceleration continuous)
