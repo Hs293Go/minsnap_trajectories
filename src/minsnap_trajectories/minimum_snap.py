@@ -168,9 +168,9 @@ def flat_output_to_quadrotor_trajectory(
     attitude = np.empty((len_traj, 4), dtype=np.float64)
     inputs = np.empty((len_traj, 4), dtype=np.float64)
     if drag_params is not None:
-        cp_term = np.sqrt(np.sum(vel * vel, axis=1))
+        cp_term = np.sqrt(np.sum(vel * vel, axis=1, keepdims=True))
         w_term = 1.0 + drag_params.cp * cp_term
-        v_dot_a = np.sum(vel * acc, axis=1)
+        v_dot_a = np.sum(vel * acc, axis=1, keepdims=True)
         dw_term = drag_params.cp * v_dot_a / cp_term
 
         dw = w_term * acc + dw_term * vel
@@ -181,9 +181,10 @@ def flat_output_to_quadrotor_trajectory(
         z_nrm = np.linalg.norm(z, axis=1, keepdims=True)
         z /= z_nrm
 
-        dz = -np.cross(z, np.cross(z, jer + dh_over_m * dw, axis=0), axis=0) / z_nrm
-        inputs[0, :] = np.sum(
-            z * (vehicle_mass * (acc + grav_vector) + drag_params.dv * w), axis=0
+        dz = -np.cross(z, np.cross(z, jer + dh_over_m * dw, axis=1), axis=1) / z_nrm
+        inputs[:, 0] = np.sum(
+            z * (vehicle_mass * (acc + grav_vector) + drag_params.dv * w),
+            axis=1,
         )
     else:
         z = acc + grav_vector
