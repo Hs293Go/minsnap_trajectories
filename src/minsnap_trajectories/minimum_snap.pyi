@@ -115,12 +115,17 @@ def generate_trajectory(
     references: Sequence[Waypoint],
     degree: int,
     *,
-    minimized_orders: Union[int, Sequence[int]] = 4,
-    continuous_orders: int = 3,
+    idx_minimized_orders: Union[int, Sequence[int]] = 4,
+    num_continuous_orders: int = 3,
     algorithm: Literal["closed-form", "constrained"] = "closed-form",
     optimize_options: Optional[Dict[str, Any]] = None,
 ) -> PiecewisePolynomialTrajectory:
     """Plans a piecewise-polynomial trajectory
+
+    Details
+    -------
+    Take usual precautions in reasoning about zero-based indices (ordinal numbers) and
+    cardinal numbers when specifying `idx_minimized_orders` and `num_continuous_orders`.
 
     Parameters
     ----------
@@ -128,10 +133,12 @@ def generate_trajectory(
         A sequence of waypoints defining the trajectory
     degree : int
         The degree of the piecewise polynomial
-    minimized_orders : Union[int, Sequence[int]], optional
-        The order of derivatives of position to be minimized, by default 4
-    continuous_orders : int, optional
+    idx_minimized_orders : Union[int, Sequence[int]], optional
+        Index/indices of derivatives of position to be minimized, by default 4 (minimum
+        snap)
+    num_continuous_orders : int, optional
         The number of orders of derivatives constrained to be continuous, by default 3
+        (continuous position, velocity and acceleration)
     algorithm : Literal["closed-form", "constrained"], optional
         The algorithm to use, either:
 

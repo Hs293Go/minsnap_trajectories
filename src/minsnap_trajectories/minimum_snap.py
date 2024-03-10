@@ -232,7 +232,12 @@ def flat_output_to_quadrotor_trajectory(
 
 
 def compute_quadrotor_trajectory(
-    polys, t_sample, vehicle_mass, yaw=None, yaw_rate=None, drag_params=None
+    polys,
+    t_sample,
+    vehicle_mass,
+    yaw=None,
+    yaw_rate=None,
+    drag_params=None,
 ):
     trajectory_derivatives = compute_trajectory_derivatives(polys, t_sample, 4)
     len_traj = len(t_sample)
@@ -263,8 +268,8 @@ def generate_trajectory(
     references,
     degree,
     *,
-    minimized_orders=4,
-    continuous_orders=3,
+    idx_minimized_orders=4,
+    num_continuous_orders=3,
     algorithm="closed-form",
     optimize_options=None,
 ):
@@ -273,28 +278,28 @@ def generate_trajectory(
 
     derivative_weights = np.zeros(degree)
 
-    minimized_orders = np.asarray(minimized_orders, dtype=np.int32).ravel()
-    if (minimized_orders < 2).any():
+    idx_minimized_orders = np.asarray(idx_minimized_orders, dtype=np.int32).ravel()
+    if (idx_minimized_orders < 2).any():
         raise ValueError("Minimizing 0th- or 1st-order derivatives does not make sense")
 
-    if (minimized_orders > degree).any():
+    if (idx_minimized_orders > degree).any():
         raise ValueError(
             "Cannot minimize any derivatives whose order is higher than the degree of"
             " the polynomial"
         )
-    derivative_weights[minimized_orders] = 1
+    derivative_weights[idx_minimized_orders] = 1
 
-    if continuous_orders < 3:
+    if num_continuous_orders < 3:
         raise ValueError(
-            f"Constraining {continuous_orders} < 2 derivatives of position (velocity"
+            f"Constraining {num_continuous_orders} < 2 derivatives of position (velocity"
             " and acceleration) usually ;does not make sense"
         )
-    if continuous_orders > degree:
+    if num_continuous_orders > degree:
         raise ValueError(
-            f"Cannot constrain {continuous_orders}-order derivatives when polynomial is"
+            f"Cannot constrain {num_continuous_orders}-order derivatives when polynomial is"
             f" {degree}-degree only"
         )
-    t_ref, refs = _parse_references(references, continuous_orders)
+    t_ref, refs = _parse_references(references, num_continuous_orders)
 
     if (t_ref < 0.0).any():
         raise ValueError("Waypoint timestamp is negative")
@@ -319,7 +324,7 @@ def generate_trajectory(
         durations,
         poly_dim,
         derivative_weights,
-        continuous_orders,
+        num_continuous_orders,
         optimize_options,
     )
     return PiecewisePolynomialTrajectory(t_ref, durations, polys)

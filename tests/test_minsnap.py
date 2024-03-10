@@ -62,7 +62,7 @@ def test_invalid_references():
         ]
 
         with pytest.raises(ValueError):
-            _ = ms.generate_trajectory(refs, 5, minimized_orders=3)
+            _ = ms.generate_trajectory(refs, 5, idx_minimized_orders=3)
 
     # Negative time
     refs = [
@@ -71,7 +71,7 @@ def test_invalid_references():
     ]
 
     with pytest.raises(ValueError):
-        _ = ms.generate_trajectory(refs, 5, minimized_orders=3)
+        _ = ms.generate_trajectory(refs, 5, idx_minimized_orders=3)
 
     # Negative time
     refs = [
@@ -79,7 +79,7 @@ def test_invalid_references():
         ms.Waypoint(1.0, np.array([1.0, 0.0])),
     ]
 
-    _ = ms.generate_trajectory(refs, 5, minimized_orders=3)
+    _ = ms.generate_trajectory(refs, 5, idx_minimized_orders=3)
 
 
 def test_single_ref():
@@ -92,7 +92,7 @@ def test_single_ref():
     t_ref, durations, coeffs = ms.generate_trajectory(
         refs,
         degree=5,
-        minimized_orders=3,
+        idx_minimized_orders=3,
     )
 
     assert t_ref == refs[0].time
@@ -114,7 +114,7 @@ def test_canned_symao_simple(test_directory):
     polys = ms.generate_trajectory(
         refs,
         degree=5,
-        minimized_orders=3,
+        idx_minimized_orders=3,
         algorithm="constrained",
     )
 
@@ -146,7 +146,7 @@ def test_canned_symao_closed_form(test_directory):
     polys = ms.generate_trajectory(
         refs,
         degree=5,
-        minimized_orders=3,
+        idx_minimized_orders=3,
         algorithm="closed-form",
     )
     # Cannot directly test polynomial coefficients since symao's version has no time
@@ -183,8 +183,8 @@ def test_canned_icsl_jeon(test_directory):
     polys = ms.generate_trajectory(
         refs,
         degree=8,
-        minimized_orders=(2, 3),
-        continuous_orders=5,
+        idx_minimized_orders=(2, 3),
+        num_continuous_orders=5,
         algorithm="constrained",
     )
 

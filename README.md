@@ -77,8 +77,8 @@ Generate a piecewise polynomial trajectory using Roy and Bry's closed form solut
 polys = ms.generate_trajectory(
     refs,
     degree=8,  # Polynomial degree
-    minimized_orders=(3, 4),  
-    continuous_orders=3,  
+    idx_minimized_orders=(3, 4),  
+    num_continuous_orders=3,  
     algorithm="closed-form",  # Or "constrained"
 )
 
@@ -127,5 +127,5 @@ Existing tests show that this piecewise polynomial planner behaves identically t
 Until more extensive tests are available, use the following parameters in polynomial planning (they are the defaults)
 
 - `degree`: From 5 to 15
-- `minimized_orders`: 4 (Minimum snap)
-- `continuous_orders`: 3 (Just keep position/velocity/acceleration continuous)
+- `idx_minimized_orders`: 4 (Minimum snap)
+- `num_continuous_orders`: 3 (Just keep position/velocity/acceleration continuous)

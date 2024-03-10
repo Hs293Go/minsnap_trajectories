@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minsnap_trajectories"
-version = "0.0.1"
+version = "0.1.1"
 description = "Simple minimum-snap trajectory generator"
 readme = "README.md"
 authors = [{ name = "H S Helson Go", email = "hei.go@mail.utoronto.ca" }]

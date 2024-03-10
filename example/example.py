@@ -48,8 +48,8 @@ def main():
     polys = ms.generate_trajectory(
         refs,
         degree=8,  # Polynomial degree
-        minimized_orders=(3, 4),  # Minimize derivatives in these orders (>= 2)
-        continuous_orders=3,  # Constrain continuity of derivatives up to order (>= 3)
+        idx_minimized_orders=(3, 4),  # Minimize derivatives in these orders (>= 2)
+        num_continuous_orders=3,  # Constrain continuity of derivatives up to order (>= 3)
         algorithm="closed-form",  # Or "constrained"
     )
 
