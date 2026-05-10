@@ -35,6 +35,8 @@ import random
 
 import numpy as np
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 from scipy import io
 
 import minsnap_trajectories as ms
@@ -121,15 +123,11 @@ def test_canned_symao_simple(test_directory):
     data = io.loadmat(test_directory / "data/symao_simple.mat")
     # Cannot directly test polynomial coefficients since symao's version has no time
     # normalization
-    kinematic_references = ms.compute_trajectory_derivatives(
-        polys, data["sample_time"], 4
-    )
+    kinematic_references = ms.compute_trajectory_derivatives(polys, data["sample_time"], 4)
 
     # Lower tolerance since MATLAB quadprog behaves differently from
     # scipy.optimize.minimize
-    assert kinematic_references == pytest.approx(
-        data["kinematic_references"], rel=1e-4, abs=1e-4
-    )
+    assert kinematic_references == pytest.approx(data["kinematic_references"], rel=1e-4, abs=1e-4)
 
 
 def test_canned_symao_closed_form(test_directory):
@@ -153,9 +151,7 @@ def test_canned_symao_closed_form(test_directory):
     # normalization
 
     data = io.loadmat(test_directory / "data/symao_closed_form.mat")
-    kinematic_references = ms.compute_trajectory_derivatives(
-        polys, data["sample_time"], 4
-    )
+    kinematic_references = ms.compute_trajectory_derivatives(polys, data["sample_time"], 4)
 
     assert kinematic_references == pytest.approx(data["kinematic_references"])
 
@@ -189,9 +185,126 @@ def test_canned_icsl_jeon(test_directory):
     )
 
     data = io.loadmat(test_directory / "data/icsl_jeon_3d.mat")
-    kinematic_references = ms.compute_trajectory_derivatives(
-        polys, data["sample_time"], 4
+    kinematic_references = ms.compute_trajectory_derivatives(polys, data["sample_time"], 4)
+    assert kinematic_references == pytest.approx(data["kinematic_references"], abs=1e-5, rel=1e-5)
+
+
+def test_waypoint_attributes():
+    wp = ms.Waypoint(
+        time=1.5,
+        position=[1.0, 2.0],
+        velocity=[3.0, 4.0],
+        acceleration=[5.0, 6.0],
+        jerk=[7.0, 8.0],
+        snap=[9.0, 10.0],
     )
-    assert kinematic_references == pytest.approx(
-        data["kinematic_references"], abs=1e-5, rel=1e-5
-    )
+    assert wp.time == 1.5
+    assert wp.position.dtype == np.float64
+    np.testing.assert_array_equal(wp.position, [1.0, 2.0])
+    np.testing.assert_array_equal(wp.velocity, [3.0, 4.0])
+    np.testing.assert_array_equal(wp.acceleration, [5.0, 6.0])
+    np.testing.assert_array_equal(wp.jerk, [7.0, 8.0])
+    np.testing.assert_array_equal(wp.snap, [9.0, 10.0])
+
+    bare = ms.Waypoint(time=0.0, position=[0.0, 0.0])
+    assert bare.velocity is None
+    assert bare.acceleration is None
+    assert bare.jerk is None
+    assert bare.snap is None
+
+
+def test_idx_minimized_orders_at_degree_raises():
+    refs = [
+        ms.Waypoint(0.0, np.array([0.0, 0.0])),
+        ms.Waypoint(1.0, np.array([1.0, 0.0])),
+    ]
+    # Degree 5 polynomial allows minimizing orders 2, 3, 4 (i.e. < degree).
+    # Order 5 must raise — historically it triggered an IndexError instead.
+    with pytest.raises(ValueError, match="degree"):
+        ms.generate_trajectory(refs, degree=5, idx_minimized_orders=5)
+    with pytest.raises(ValueError, match="degree"):
+        ms.generate_trajectory(refs, degree=5, idx_minimized_orders=(3, 5))
+
+
+def test_yaw_array_input_does_not_raise():
+    refs = [
+        ms.Waypoint(0.0, np.array([0.0, 0.0, 10.0])),
+        ms.Waypoint(2.0, np.array([1.0, 1.0, 10.0])),
+    ]
+    polys = ms.generate_trajectory(refs, degree=7, idx_minimized_orders=4)
+    t = np.linspace(0, 2, 10)
+    yaw = np.linspace(0.0, 0.5, 10)
+    # Previously, `if yaw == "velocity"` would raise on an array input.
+    traj = ms.compute_quadrotor_trajectory(polys, t, vehicle_mass=1.0, yaw=yaw)
+    assert traj.state.shape == (10, 10)
+
+
+def test_constrained_solver_failure_raises(monkeypatch):
+    refs = [
+        ms.Waypoint(0.0, np.array([0.0, 0.0])),
+        ms.Waypoint(1.0, np.array([1.0, 0.0])),
+    ]
+    from scipy import optimize
+
+    real_minimize = optimize.minimize
+
+    def fake_minimize(*args, **kwargs):
+        result = real_minimize(*args, **kwargs)
+        result.success = False
+        result.message = "synthetic failure"
+        return result
+
+    monkeypatch.setattr(optimize, "minimize", fake_minimize)
+    with pytest.raises(RuntimeError, match="synthetic failure"):
+        ms.generate_trajectory(refs, degree=5, idx_minimized_orders=3, algorithm="constrained")
+
+
+def test_compute_trajectory_derivatives_validates_num_orders():
+    refs = [
+        ms.Waypoint(0.0, np.array([0.0, 0.0])),
+        ms.Waypoint(1.0, np.array([1.0, 0.0])),
+    ]
+    polys = ms.generate_trajectory(refs, degree=5, idx_minimized_orders=3)
+    with pytest.raises(ValueError):
+        ms.compute_trajectory_derivatives(polys, np.linspace(0, 1, 5), 0)
+    with pytest.raises(ValueError):
+        ms.compute_trajectory_derivatives(polys, np.linspace(0, 1, 5), 100)
+
+
+def test_flat_output_singularity_raises():
+    # Construct a synthetic flat-output sample where acc + g ~ 0 (free-fall +
+    # downward acceleration), so the body z-axis would have to point straight down.
+    derivs = np.zeros((4, 1, 3))
+    derivs[2, 0, :] = [0.0, 0.0, -20.0]  # acc that overpowers gravity downward
+    with pytest.raises(ValueError, match="singular"):
+        ms.flat_output_to_quadrotor_trajectory(
+            derivs, vehicle_mass=1.0, yaw=np.zeros(1), yaw_rate=np.zeros(1)
+        )
+
+
+@given(
+    n_intermediate=st.integers(min_value=1, max_value=4),
+    algorithm=st.sampled_from(["closed-form", "constrained"]),
+    seed=st.integers(min_value=0, max_value=2**31 - 1),
+)
+@settings(
+    max_examples=20,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+def test_trajectory_passes_through_waypoints(n_intermediate, algorithm, seed):
+    rng = np.random.default_rng(seed)
+    times = np.cumsum(rng.uniform(0.5, 2.0, size=n_intermediate + 1))
+    times = np.insert(times, 0, 0.0)
+    positions = rng.uniform(-5.0, 5.0, size=(n_intermediate + 2, 2))
+
+    refs = [ms.Waypoint(t, p) for t, p in zip(times, positions, strict=True)]
+    polys = ms.generate_trajectory(refs, degree=7, idx_minimized_orders=4, algorithm=algorithm)
+    sampled = ms.compute_trajectory_derivatives(polys, times, 3)
+    # Position at each waypoint matches its reference.
+    np.testing.assert_allclose(sampled[0], positions, atol=1e-7, rtol=1e-7)
+    # Velocity and acceleration at endpoints are zero (default).
+    np.testing.assert_allclose(sampled[1, 0], 0.0, atol=1e-7)
+    np.testing.assert_allclose(sampled[1, -1], 0.0, atol=1e-7)
+    np.testing.assert_allclose(sampled[2, 0], 0.0, atol=1e-7)
+    np.testing.assert_allclose(sampled[2, -1], 0.0, atol=1e-7)

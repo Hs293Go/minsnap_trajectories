@@ -20,158 +20,239 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
 OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
+import dataclasses
 import warnings
-from typing import NamedTuple
+from collections.abc import Sequence
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 import scipy.linalg as la
+from numpy.typing import ArrayLike, NDArray
 from scipy import optimize
 
+Algorithm = Literal["closed-form", "constrained"]
 
-class Waypoint(dict):
+_DERIVATIVE_ATTRS = ("position", "velocity", "acceleration", "jerk", "snap")
 
-    def __init__(
-        self, time, position, velocity=None, acceleration=None, jerk=None, snap=None
-    ):
-        # This class is based on dict (instead of some sequential container) to support
-        # the unlikely case there are 'gaps' in
-        # orders of derivative specified
 
-        self[-1] = time
-        self[0] = np.asarray(position)
-        if velocity is not None:
-            self[1] = np.asarray(velocity)
+@dataclasses.dataclass(frozen=True, slots=True)
+class Waypoint:
+    """A waypoint defining a piecewise-polynomial trajectory.
 
-        if acceleration is not None:
-            self[2] = np.asarray(acceleration)
+    Holds a timestamp, a position, and optionally any of the higher-order
+    derivatives (velocity, acceleration, jerk, snap). Unspecified derivatives
+    are left free for the planner to choose, except that velocity and
+    acceleration are pinned to zero at the first and last waypoint when
+    not given explicitly.
 
-        if jerk is not None:
-            self[3] = np.asarray(jerk)
+    Parameters
+    ----------
+    time : float
+        Timestamp of the waypoint.
+    position : ArrayLike
+        Position at the waypoint.
+    velocity, acceleration, jerk, snap : ArrayLike, optional
+        Higher-order derivatives at the waypoint. Each must broadcast to the
+        same shape as ``position``.
+    """
 
-        if snap is not None:
-            self[4] = np.asarray(snap)
+    time: float
+    position: NDArray[np.float64]
+    velocity: NDArray[np.float64] | None = None
+    acceleration: NDArray[np.float64] | None = None
+    jerk: NDArray[np.float64] | None = None
+    snap: NDArray[np.float64] | None = None
 
-    @property
-    def time(self):
-        return self[-1]
+    def __post_init__(self) -> None:
+        for attr in _DERIVATIVE_ATTRS:
+            value = getattr(self, attr)
+            if value is None:
+                continue
+            object.__setattr__(self, attr, np.asarray(value, dtype=np.float64))
 
-    @property
-    def position(self):
-        return self[0]
-
-    @property
-    def velocity(self):
-        return self[1]
-
-    @property
-    def acceleration(self):
-        return self[2]
+    def derivative(self, order: int) -> NDArray[np.float64] | None:
+        """Return the derivative of the given order, or ``None`` if not set."""
+        if not 0 <= order < len(_DERIVATIVE_ATTRS):
+            return None
+        return getattr(self, _DERIVATIVE_ATTRS[order])
 
 
 class PolynomialSize(NamedTuple):
-    n_poly: int  # Number of references - 1
+    n_poly: int  # Number of pieces
     n_cfs: int  # degree + 1
     dim: int
 
 
 class PiecewisePolynomialTrajectory(NamedTuple):
-    time_reference: np.ndarray
-    durations: np.ndarray
-    coefficients: np.ndarray
+    """Piecewise-polynomial trajectory.
+
+    ``coefficients[i, j, d]`` is the j-th coefficient of the i-th piece's
+    polynomial along dimension ``d``. Each piece is parameterised by absolute
+    time within the piece (i.e. ``t - time_reference[i]``).
+    """
+
+    time_reference: NDArray[np.float64]
+    durations: NDArray[np.float64]
+    coefficients: NDArray[np.float64]
 
 
 class RotorDragParameters(NamedTuple):
+    """RDR rotor drag model parameters.
+
+    ``cp`` is a velocity-dependent rotor-drag time constant. ``dh`` and ``dv``
+    are the diagonal entries of ``D = diag([dh, dv, dh])``.
+    """
+
     cp: float
     dh: float
     dv: float
 
 
 class QuadrotorTrajectory(NamedTuple):
-    state: np.ndarray
-    input: np.ndarray
+    """Quadrotor state and input trajectory.
+
+    ``state`` is a horizontal stack ``[position, attitude, velocity]`` where
+    attitude is a unit quaternion. ``input`` is ``[thrust, body_rates]``.
+    """
+
+    state: NDArray[np.float64]
+    input: NDArray[np.float64]
 
     @property
-    def position(self):
+    def position(self) -> NDArray[np.float64]:
         return self.state[:, 0:3]
 
     @property
-    def attitude(self):
+    def attitude(self) -> NDArray[np.float64]:
         return self.state[:, 3:7]
 
     @property
-    def velocity(self):
+    def velocity(self) -> NDArray[np.float64]:
         return self.state[:, 7:10]
 
     @property
-    def thrust(self):
+    def thrust(self) -> NDArray[np.float64]:
         return self.input[:, 0]
 
     @property
-    def body_rates(self):
+    def body_rates(self) -> NDArray[np.float64]:
         return self.input[:, 1:4]
 
 
-def compute_trajectory_derivatives(polys, t_sample, order):
-    t_sample = np.asarray(t_sample)
+def compute_trajectory_derivatives(
+    polys: PiecewisePolynomialTrajectory,
+    t_sample: ArrayLike,
+    num_orders: int,
+) -> NDArray[np.float64]:
+    """Sample a piecewise-polynomial trajectory.
+
+    Parameters
+    ----------
+    polys : PiecewisePolynomialTrajectory
+        A trajectory produced by :func:`generate_trajectory`.
+    t_sample : ArrayLike
+        Sample times.
+    num_orders : int
+        Number of derivative orders to evaluate. ``num_orders=3`` returns
+        position, velocity, and acceleration; ``num_orders=4`` adds jerk.
+
+    Returns
+    -------
+    NDArray
+        Array of shape ``(num_orders, len(t_sample), dim)`` stacking the
+        derivative samples along the first axis.
+    """
+    t_sample = np.atleast_1d(np.asarray(t_sample, dtype=np.float64)).ravel()
     t_ref, _, coeffs = polys
+    n_pieces, n_cfs, dim = coeffs.shape
 
-    _, n_cfs, dim = coeffs.shape
-    if order < 0:
-        raise ValueError("Negative derivative order")
-    if order > n_cfs - 1:
-        raise ValueError(f"Kinematic order {order} > polynomial degree {n_cfs - 1}")
+    if num_orders < 1:
+        raise ValueError("num_orders must be at least 1")
+    if num_orders > n_cfs:
+        raise ValueError(
+            f"Cannot compute {num_orders} derivative orders from a degree-{n_cfs - 1} polynomial"
+        )
+
     len_traj = t_sample.size
-    trajectory_derivatives = np.zeros((order, len_traj, dim), dtype=np.float64)
+    result = np.zeros((num_orders, len_traj, dim), dtype=np.float64)
+    if n_pieces == 0:
+        return result
 
-    def find_piece(t):
-        if not t_ref[0] <= t <= t_ref[-1]:
-            warnings.warn("Query point is outside of bounds. Clamping", stacklevel=2)
-            t = np.clip(t, t_ref[0], t_ref[-1])
-        idx = np.flatnonzero(t >= t_ref[:-1])[-1]
-        tau = t - t_ref[idx]
-        return coeffs[idx, ...], tau
+    if (t_sample < t_ref[0]).any() or (t_sample > t_ref[-1]).any():
+        warnings.warn("Query points outside of bounds; clamping", stacklevel=2)
+        t_sample = np.clip(t_sample, t_ref[0], t_ref[-1])
 
-    for r in range(order):
-        for k, t in enumerate(t_sample):
-            piece, segment_time = find_piece(t)
+    piece_idx = np.clip(np.searchsorted(t_ref, t_sample, side="right") - 1, 0, n_pieces - 1)
+    tau = t_sample - t_ref[piece_idx]
+    piece_coeffs = coeffs[piece_idx]  # (len_traj, n_cfs, dim)
 
-            trajectory_derivatives[r, k, :] = _nd_polyvals(piece, segment_time, r)
-    return trajectory_derivatives
+    n = np.arange(n_cfs)
+    for r in range(num_orders):
+        if r == 0:
+            prefactor = np.ones(n_cfs, dtype=np.float64)
+        else:
+            m = np.arange(r)[:, None]
+            prefactor = np.prod(n[None, :] - m, axis=0).astype(np.float64)
+            # prefactor is 0 for n < r since (n - n) = 0 appears in the product.
+        exponents = np.maximum(n - r, 0)
+        powers = tau[:, None] ** exponents[None, :]
+        weighted = prefactor[None, :] * powers  # (len_traj, n_cfs)
+        result[r] = (weighted[..., None] * piece_coeffs).sum(axis=1)
+    return result
 
 
 def flat_output_to_quadrotor_trajectory(
-    trajectory_derivatives,
-    vehicle_mass,
-    yaw,
-    yaw_rate,
-    drag_params=None,
-):
+    trajectory_derivatives: ArrayLike,
+    vehicle_mass: float,
+    yaw: ArrayLike,
+    yaw_rate: ArrayLike,
+    drag_params: RotorDragParameters | None = None,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Map flat-output samples to quadrotor attitude and inputs.
+
+    Parameters
+    ----------
+    trajectory_derivatives : ArrayLike
+        Array of shape ``(num_orders, n_samples, 3)`` produced by
+        :func:`compute_trajectory_derivatives`. Must include up to jerk
+        (``num_orders >= 4``).
+    vehicle_mass : float
+        Mass of the quadrotor.
+    yaw, yaw_rate : ArrayLike
+        Yaw angle and yaw rate samples, length ``n_samples``.
+    drag_params : RotorDragParameters, optional
+        RDR rotor-drag model parameters.
+
+    Returns
+    -------
+    tuple[NDArray, NDArray]
+        ``(attitude, inputs)`` where attitude is an ``(n_samples, 4)`` array of
+        unit quaternions and inputs is ``(n_samples, 4)`` containing thrust
+        and body rates.
+    """
     grav_vector = np.array([0.0, 0.0, 9.81])
-    trajectory_derivatives = np.asarray(trajectory_derivatives, dtype=np.float64)
-    trajectory_derivatives = np.atleast_3d(trajectory_derivatives)
+    trajectory_derivatives = np.atleast_3d(np.asarray(trajectory_derivatives, dtype=np.float64))
 
     n_ders, len_traj, n_dims = trajectory_derivatives.shape
 
     if n_dims != 3:
-        raise ValueError(
-            f"Incorrect dimensions for quadrotor trajectory: {n_dims} != 3"
-        )
+        raise ValueError(f"Incorrect dimensions for quadrotor trajectory: {n_dims} != 3")
+    if n_ders < 4:
+        raise ValueError(f"Need at least 4 derivative orders (jerk); got {n_ders}")
 
-    # This should be guaranteed if this function is forwarded to from
-    # compute_quadrotor_trajectory
-    assert n_ders in (3, 4)
+    vel = trajectory_derivatives[1, ...]
+    acc = trajectory_derivatives[2, ...]
+    jer = trajectory_derivatives[3, ...]
 
-    vel = np.atleast_2d(trajectory_derivatives[1, ...])
-    acc = np.atleast_2d(trajectory_derivatives[2, ...])
-    jer = np.atleast_2d(trajectory_derivatives[3, ...])
-
-    attitude = np.empty((len_traj, 4), dtype=np.float64)
     inputs = np.empty((len_traj, 4), dtype=np.float64)
     if drag_params is not None:
-        cp_term = np.sqrt(np.sum(vel * vel, axis=1, keepdims=True))
+        cp_term = np.linalg.norm(vel, axis=1, keepdims=True)
         w_term = 1.0 + drag_params.cp * cp_term
-        v_dot_a = np.sum(vel * acc, axis=1, keepdims=True)
-        dw_term = drag_params.cp * v_dot_a / cp_term
+        with np.errstate(divide="ignore", invalid="ignore"):
+            v_dot_a = np.sum(vel * acc, axis=1, keepdims=True)
+            dw_term = np.where(cp_term > 0, drag_params.cp * v_dot_a / cp_term, 0.0)
 
         dw = w_term * acc + dw_term * vel
         w = w_term * vel
@@ -179,7 +260,7 @@ def flat_output_to_quadrotor_trajectory(
 
         z = acc + dh_over_m * w + grav_vector
         z_nrm = np.linalg.norm(z, axis=1, keepdims=True)
-        z /= z_nrm
+        z = z / z_nrm
 
         dz = -np.cross(z, np.cross(z, jer + dh_over_m * dw, axis=1), axis=1) / z_nrm
         inputs[:, 0] = np.sum(
@@ -189,10 +270,20 @@ def flat_output_to_quadrotor_trajectory(
     else:
         z = acc + grav_vector
         z_nrm = np.linalg.norm(z, axis=1, keepdims=True)
-        z /= z_nrm
+        z = z / z_nrm
 
         dz = -np.cross(z, np.cross(z, jer, axis=1), axis=1) / z_nrm
         inputs[:, 0] = np.sum(z * (vehicle_mass * (acc + grav_vector)), axis=1)
+
+    if np.any(z[:, 2] <= -1.0 + 1e-9):
+        raise ValueError(
+            "Flatness map is singular: trajectory requires the body z-axis to point "
+            "directly downward at some sample (cos(tilt) <= -1). Check the trajectory "
+            "or sample more conservatively."
+        )
+
+    yaw = np.broadcast_to(np.asarray(yaw, dtype=np.float64), (len_traj,))
+    yaw_rate = np.broadcast_to(np.asarray(yaw_rate, dtype=np.float64), (len_traj,))
 
     tilt_den = np.sqrt(2.0 * (1.0 + z[:, 2]))
     tilt0 = 0.5 * tilt_den
@@ -214,16 +305,8 @@ def flat_output_to_quadrotor_trajectory(
     omg_term = dz[:, 2] / omg_den
     inputs[:, 1:4] = np.column_stack(
         [
-            (
-                dz[:, 0] * s_psi
-                - dz[:, 1] * c_psi
-                - (z[:, 0] * s_psi - z[:, 1] * c_psi) * omg_term
-            ),
-            (
-                dz[:, 0] * c_psi
-                + dz[:, 1] * s_psi
-                - (z[:, 0] * c_psi + z[:, 1] * s_psi) * omg_term
-            ),
+            (dz[:, 0] * s_psi - dz[:, 1] * c_psi - (z[:, 0] * s_psi - z[:, 1] * c_psi) * omg_term),
+            (dz[:, 0] * c_psi + dz[:, 1] * s_psi - (z[:, 0] * c_psi + z[:, 1] * s_psi) * omg_term),
             (z[:, 1] * dz[:, 0] - z[:, 0] * dz[:, 1]) / omg_den + yaw_rate,
         ]
     )
@@ -232,47 +315,87 @@ def flat_output_to_quadrotor_trajectory(
 
 
 def compute_quadrotor_trajectory(
-    polys,
-    t_sample,
-    vehicle_mass,
-    yaw=None,
-    yaw_rate=None,
-    drag_params=None,
-):
-    trajectory_derivatives = compute_trajectory_derivatives(polys, t_sample, 4)
-    len_traj = len(t_sample)
-    if yaw is not None:
-        if yaw == "velocity":
-            yaw = np.arctan2(
-                trajectory_derivatives[1, :, 1], trajectory_derivatives[1, :, 0]
-            )
-        yaw = np.broadcast_to(yaw, [len_traj])
-    else:
-        yaw = np.zeros(len_traj)
+    polys: PiecewisePolynomialTrajectory,
+    t_sample: ArrayLike,
+    vehicle_mass: float,
+    yaw: ArrayLike | Literal["velocity"] | None = None,
+    yaw_rate: ArrayLike | None = None,
+    drag_params: RotorDragParameters | None = None,
+) -> QuadrotorTrajectory:
+    """Compute a full quadrotor state/input trajectory.
 
-    if yaw_rate is not None:
-        yaw_rate = np.broadcast_to(yaw_rate, [len_traj])
+    Parameters
+    ----------
+    polys : PiecewisePolynomialTrajectory
+        A 3D trajectory produced by :func:`generate_trajectory`.
+    t_sample : ArrayLike
+        Sample times.
+    vehicle_mass : float
+        Mass of the quadrotor.
+    yaw : ArrayLike or "velocity", optional
+        Yaw references. ``None`` (default) sets yaw to zero. ``"velocity"``
+        aligns yaw with the velocity vector at each sample.
+    yaw_rate : ArrayLike, optional
+        Yaw-rate references. ``None`` (default) sets yaw rate to zero.
+    drag_params : RotorDragParameters, optional
+        Rotor-drag parameters.
+    """
+    trajectory_derivatives = compute_trajectory_derivatives(polys, t_sample, 4)
+    len_traj = trajectory_derivatives.shape[1]
+
+    if isinstance(yaw, str):
+        if yaw != "velocity":
+            raise ValueError(f"Unrecognized yaw mode: {yaw!r}")
+        yaw_arr = np.arctan2(trajectory_derivatives[1, :, 1], trajectory_derivatives[1, :, 0])
+    elif yaw is None:
+        yaw_arr = np.zeros(len_traj)
     else:
-        yaw_rate = np.zeros(len_traj)
+        yaw_arr = np.broadcast_to(np.asarray(yaw, dtype=np.float64), (len_traj,))
+
+    if yaw_rate is None:
+        yaw_rate_arr = np.zeros(len_traj)
+    else:
+        yaw_rate_arr = np.broadcast_to(np.asarray(yaw_rate, dtype=np.float64), (len_traj,))
 
     attitudes, inputs = flat_output_to_quadrotor_trajectory(
-        trajectory_derivatives, vehicle_mass, yaw, yaw_rate, drag_params
+        trajectory_derivatives, vehicle_mass, yaw_arr, yaw_rate_arr, drag_params
     )
-    positions = trajectory_derivatives[0, :, :]
-    velocities = trajectory_derivatives[1, :, :]
+    positions = trajectory_derivatives[0]
+    velocities = trajectory_derivatives[1]
 
     return QuadrotorTrajectory(np.hstack([positions, attitudes, velocities]), inputs)
 
 
 def generate_trajectory(
-    references,
-    degree,
+    references: Sequence[Waypoint],
+    degree: int,
     *,
-    idx_minimized_orders=4,
-    num_continuous_orders=3,
-    algorithm="closed-form",
-    optimize_options=None,
-):
+    idx_minimized_orders: int | Sequence[int] = 4,
+    num_continuous_orders: int = 3,
+    algorithm: Algorithm = "closed-form",
+    optimize_options: dict[str, Any] | None = None,
+) -> PiecewisePolynomialTrajectory:
+    """Plan a piecewise-polynomial trajectory through a sequence of waypoints.
+
+    Parameters
+    ----------
+    references : Sequence[Waypoint]
+        Waypoints defining the trajectory.
+    degree : int
+        Polynomial degree of each piece. Must be at least 2.
+    idx_minimized_orders : int or Sequence[int], optional
+        Index/indices of derivative orders to minimize. Each must satisfy
+        ``2 <= idx < degree``. Default is 4 (minimum snap).
+    num_continuous_orders : int, optional
+        Number of derivative orders constrained to be continuous across
+        piece boundaries. Default is 3 (position, velocity, acceleration).
+    algorithm : "closed-form" or "constrained", optional
+        ``"closed-form"`` uses Bry & Roy's unconstrained reformulation;
+        ``"constrained"`` uses Mellinger & Kumar's direct QP via SLSQP.
+    optimize_options : dict, optional
+        Options forwarded to ``scipy.optimize.minimize``. Ignored by the
+        closed-form solver.
+    """
     if degree < 2:
         raise ValueError("Polynomial degree too low")
 
@@ -281,23 +404,22 @@ def generate_trajectory(
     idx_minimized_orders = np.asarray(idx_minimized_orders, dtype=np.int32).ravel()
     if (idx_minimized_orders < 2).any():
         raise ValueError("Minimizing 0th- or 1st-order derivatives does not make sense")
-
-    if (idx_minimized_orders > degree).any():
+    if (idx_minimized_orders >= degree).any():
         raise ValueError(
-            "Cannot minimize any derivatives whose order is higher than the degree of"
-            " the polynomial"
+            f"Cannot minimize derivative orders >= polynomial degree ({degree}); "
+            f"got {idx_minimized_orders.tolist()}"
         )
     derivative_weights[idx_minimized_orders] = 1
 
     if num_continuous_orders < 3:
         raise ValueError(
-            f"Constraining {num_continuous_orders} < 2 derivatives of position (velocity"
-            " and acceleration) usually ;does not make sense"
+            f"Constraining only {num_continuous_orders} (< 3) derivatives of position "
+            "(position, velocity, acceleration) usually does not make sense"
         )
     if num_continuous_orders > degree:
         raise ValueError(
-            f"Cannot constrain {num_continuous_orders}-order derivatives when polynomial is"
-            f" {degree}-degree only"
+            f"Cannot constrain {num_continuous_orders}-order derivatives when "
+            f"polynomial is degree {degree} only"
         )
     t_ref, refs = _parse_references(references, num_continuous_orders)
 
@@ -305,21 +427,14 @@ def generate_trajectory(
         raise ValueError("Waypoint timestamp is negative")
     durations = np.diff(t_ref)
     if (durations <= 1e-8).any():
-        raise ValueError(
-            "The time duration for transiting between waypoints is too small"
-        )
+        raise ValueError("The time duration for transiting between waypoints is too small")
 
-    poly_dim = PolynomialSize(
-        n_poly=refs.shape[0] - 1, n_cfs=degree + 1, dim=refs.shape[2]
-    )
+    poly_dim = PolynomialSize(n_poly=refs.shape[0] - 1, n_cfs=degree + 1, dim=refs.shape[2])
 
-    if algorithm == "constrained":
-        solver = _solve_constrained
-    elif algorithm == "closed-form":
-        solver = _solve_closed_form
-    else:
-        raise ValueError("Unrecognized algorithm")
-    polys = solver(
+    solvers = {"closed-form": _solve_closed_form, "constrained": _solve_constrained}
+    if algorithm not in solvers:
+        raise ValueError(f"Unrecognized algorithm: {algorithm!r}")
+    polys = solvers[algorithm](
         refs,
         durations,
         poly_dim,
@@ -330,66 +445,75 @@ def generate_trajectory(
     return PiecewisePolynomialTrajectory(t_ref, durations, polys)
 
 
-def _nd_polyvals(coeffs, time, r):
-    n_cfs = coeffs.shape[0]  # Coefficients per-piece
-    if r == 0:
-        return (time ** np.arange(0, n_cfs)) @ coeffs
-    n_seq = np.arange(r, n_cfs, dtype=np.int64)
-    r_seq = np.arange(0, r, dtype=np.int64)
-    return time ** (n_seq - r) @ (
-        np.prod(n_seq[None, :] - r_seq[:, None], axis=0)[..., None] * coeffs[n_seq, :]
-    )
-
-
-def _parse_references(references, r_cts):
+def _parse_references(
+    references: Sequence[Waypoint], r_cts: int
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     len_traj = len(references)
 
-    t_ref = []
-    trajectory_ref = []
-    for idx, it in enumerate(references):
-        ref = []
-        t_ref.append(it.time)
-        ref.append(it.position)
-        dim = len(it.position)
+    t_ref: list[float] = []
+    trajectory_ref: list[NDArray[np.float64]] = []
+    max_specified_order = len(_DERIVATIVE_ATTRS) - 1
+    for idx, wp in enumerate(references):
+        t_ref.append(wp.time)
+        dim = len(wp.position)
+        ref: list[NDArray[np.float64]] = [wp.position]
 
-        if any(k > r_cts for k in it.keys()):
-            warnings.warn("Too many derivatives specified", stacklevel=2)
-        # velocity/acceleration are constrained to zero at initial or terminal points;
-        # Otherwise they are unconstrained as signalled by nans
-        # Higher-order derivatives are always unconstrained unless specified
+        # Warn if the user specified derivatives that exceed the continuity request.
+        for order in range(r_cts, max_specified_order + 1):
+            if wp.derivative(order) is not None:
+                warnings.warn(
+                    f"Waypoint specifies order-{order} derivative but "
+                    f"num_continuous_orders={r_cts} drops it",
+                    stacklevel=3,
+                )
+                break
+
+        # Velocity/acceleration default to zero at endpoints, NaN (free) elsewhere.
+        # Higher-order derivatives default to NaN unless explicitly given.
         for r in range(1, r_cts):
-            if r < 3 and idx in (0, len_traj - 1):
-                placeholder = np.zeros(dim)
+            specified = wp.derivative(r) if r <= max_specified_order else None
+            if specified is not None:
+                ref.append(specified)
+            elif r < 3 and idx in (0, len_traj - 1):
+                ref.append(np.zeros(dim))
             else:
-                placeholder = np.full([dim], np.nan)
-
-            ref.append(it.get(r, placeholder))
+                ref.append(np.full((dim,), np.nan))
 
         trajectory_ref.append(np.array(ref))
 
-    trajectory_ref = np.asarray(trajectory_ref)
+    return (
+        np.asarray(t_ref, dtype=np.float64),
+        np.asarray(trajectory_ref, dtype=np.float64),
+    )
 
-    t_ref = np.asarray(t_ref)
-    return t_ref, trajectory_ref
+
+def _scale_coefficients(
+    coeffs: NDArray[np.float64], durations: NDArray[np.float64], n_cfs: int
+) -> NDArray[np.float64]:
+    """Convert per-piece coefficients from normalized to absolute time.
+
+    ``coeffs`` and the result are shape ``(n_poly, n_cfs)``; ``durations`` is
+    shape ``(n_poly,)``.
+    """
+    scale = (1.0 / durations[:, None]) ** np.arange(0, n_cfs)[None, :]
+    return scale * coeffs
 
 
 def _solve_closed_form(
-    refs,
-    durations,
-    poly_dim,
-    derivative_weights,
-    r_cts,
-    optimize_options,
-):
+    refs: NDArray[np.float64],
+    durations: NDArray[np.float64],
+    poly_dim: PolynomialSize,
+    derivative_weights: NDArray[np.float64],
+    r_cts: int,
+    optimize_options: dict[str, Any] | None,
+) -> NDArray[np.float64]:
     if r_cts < 3:
-        raise ValueError(
-            "Trajectory must be continuous up to the 2nd order (acceleration)"
-        )
+        raise ValueError("Trajectory must be continuous up to the 2nd order (acceleration)")
 
     if optimize_options is not None:
         warnings.warn(
-            "Solving the trajectory generation problem in closed form."
-            "Optimizer options will be ignored",
+            "Solving the trajectory generation problem in closed form; "
+            "optimize_options will be ignored",
             stacklevel=2,
         )
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
@@ -402,12 +526,8 @@ def _solve_closed_form(
     for i in range(poly_dim.n_poly):
         s = np.s_[poly_dim.n_cfs * i : poly_dim.n_cfs * (i + 1)]
         for r in range(r_cts):
-            A[r_cts * 2 * i + r, s] = (
-                _compute_tvec(poly_dim.n_cfs, r, 0) / durations[i] ** r
-            )
-            A[r_cts * (2 * i + 1) + r, s] = (
-                _compute_tvec(poly_dim.n_cfs, r, 1) / durations[i] ** r
-            )
+            A[r_cts * 2 * i + r, s] = _compute_tvec(poly_dim.n_cfs, r, 0) / durations[i] ** r
+            A[r_cts * (2 * i + 1) + r, s] = _compute_tvec(poly_dim.n_cfs, r, 1) / durations[i] ** r
 
     M = np.zeros((poly_dim.n_poly * 2 * r_cts, r_cts * (poly_dim.n_poly + 1)))
     for i in range(poly_dim.n_poly):
@@ -417,16 +537,12 @@ def _solve_closed_form(
 
     num_d = r_cts * (poly_dim.n_poly + 1)
 
-    # compute C
     C = np.eye(num_d)
-    # fix all pos(poly_dim.n_poly+1) + start va(2) +  va(2)
     fix_idx = np.flatnonzero(np.all(~np.isnan(refs), axis=2).ravel())
     free_idx = np.setdiff1d(np.arange(num_d), fix_idx)
     C = np.hstack([C[:, fix_idx], C[:, free_idx]])
 
-    res = la.lstsq(A, M @ C)
-    assert res is not None
-    AiMC = res[0]
+    AiMC = la.lstsq(A, M @ C)[0]
     R = AiMC.T @ Q @ AiMC
 
     n_fix = fix_idx.size
@@ -436,25 +552,31 @@ def _solve_closed_form(
     for d in range(poly_dim.dim):
         ref = refs[..., d]
         df = ref.ravel()[fix_idx]
-        dp = -la.solve(Rpp, Rfp.T @ df)
+        rhs = -(Rfp.T @ df)
+        try:
+            dp = la.solve(Rpp, rhs, assume_a="pos")
+        except (la.LinAlgError, ValueError):
+            warnings.warn(
+                "Closed-form Hessian is singular; falling back to least-squares solve",
+                stacklevel=2,
+            )
+            dp = la.lstsq(Rpp, rhs)[0]
 
         coeffs = np.reshape(AiMC @ np.concatenate([df, dp]), poly_dim[0:2])
-        poly_coeffs[:, :, d] = (1.0 / durations[..., None]) ** np.arange(
-            0, poly_dim.n_cfs
-        ) * coeffs
+        poly_coeffs[:, :, d] = _scale_coefficients(coeffs, durations, poly_dim.n_cfs)
 
     return poly_coeffs
 
 
 def _solve_constrained(
-    refs,
-    durations,
-    poly_dim,
-    derivative_weights,
-    r_cts,
-    optimize_options,
-):
-    opts = {"method": "SLSQP", "tol": 1e-10}
+    refs: NDArray[np.float64],
+    durations: NDArray[np.float64],
+    poly_dim: PolynomialSize,
+    derivative_weights: NDArray[np.float64],
+    r_cts: int,
+    optimize_options: dict[str, Any] | None,
+) -> NDArray[np.float64]:
+    opts: dict[str, Any] = {"method": "SLSQP", "tol": 1e-10}
     if optimize_options is not None:
         opts.update(optimize_options)
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
@@ -465,14 +587,12 @@ def _solve_constrained(
     poly_coeffs = np.zeros(poly_dim)
     Aeq_1, beq_1 = _compute_continuity_constraints(poly_dim, durations, r_cts)
     for d in range(poly_dim.dim):
-        Aeq_0, beq_0 = _compute_dynamical_constraints(
-            poly_dim, refs[:, :, d], durations
-        )
+        Aeq_0, beq_0 = _compute_dynamical_constraints(poly_dim, refs[:, :, d], durations)
 
         Aeq = np.vstack([Aeq_0, Aeq_1])
         beq = np.concatenate([beq_0, beq_1])
 
-        constr = optimize.LinearConstraint(Aeq, beq, beq)  # type: ignore
+        constr = optimize.LinearConstraint(Aeq, beq, beq)
         soln = optimize.minimize(
             lambda x: (x @ Q @ x) / 2,
             np.zeros(n_vars),
@@ -480,14 +600,16 @@ def _solve_constrained(
             jac=lambda x: Q @ x,
             **opts,
         )
+        if not soln.success:
+            raise RuntimeError(f"Constrained QP solver failed for dimension {d}: {soln.message}")
         coeffs = soln.x.reshape(poly_dim[0:2])
-        poly_coeffs[:, :, d] = (1.0 / durations[..., None]) ** np.arange(
-            0, poly_dim.n_cfs
-        ) * coeffs
+        poly_coeffs[:, :, d] = _scale_coefficients(coeffs, durations, poly_dim.n_cfs)
     return poly_coeffs
 
 
-def _compute_continuity_constraints(poly_dim, durations, r_cts):
+def _compute_continuity_constraints(
+    poly_dim: PolynomialSize, durations: NDArray[np.float64], r_cts: int
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
     Aeq = np.zeros(((poly_dim.n_poly - 1) * r_cts, n_vars))
     beq = np.zeros((poly_dim.n_poly - 1) * r_cts)
@@ -501,7 +623,11 @@ def _compute_continuity_constraints(poly_dim, durations, r_cts):
     return Aeq, beq
 
 
-def _compute_dynamical_constraints(poly_dim, refs, durations):
+def _compute_dynamical_constraints(
+    poly_dim: PolynomialSize,
+    refs: NDArray[np.float64],
+    durations: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     n_vars = poly_dim.n_poly * poly_dim.n_cfs
     n_constrain_orders = np.count_nonzero(~np.isnan(refs), axis=1)
     Aeq = np.zeros((n_constrain_orders.sum(), n_vars))
@@ -512,28 +638,22 @@ def _compute_dynamical_constraints(poly_dim, refs, durations):
         idx, tau = (i - 1, 1.0) if i == poly_dim.n_poly else (i, 0.0)
         s = np.s_[poly_dim.n_cfs * idx : poly_dim.n_cfs * (1 + idx)]
         for r in range(n_constrain_orders[i]):
-            Aeq[row_its[i] + r, s] = (
-                _compute_tvec(poly_dim.n_cfs, r, tau) / durations[idx] ** r
-            )
+            Aeq[row_its[i] + r, s] = _compute_tvec(poly_dim.n_cfs, r, tau) / durations[idx] ** r
             beq[row_its[i] + r] = refs[i, r]
     return Aeq, beq
 
 
-def _compute_Q(n_cfs, r, tau):  # pylint: disable=C0103
+def _compute_Q(n_cfs: int, r: int, tau: NDArray[np.float64]) -> NDArray[np.float64]:
     Q = np.zeros((len(tau), n_cfs, n_cfs))
 
-    i, l = np.meshgrid(*[np.arange(r, n_cfs)] * 2, sparse=True)  # NOQA
+    i, l = np.meshgrid(*[np.arange(r, n_cfs)] * 2, sparse=True)
     m_seq = np.arange(0, r)[:, None, None]
     k = -2 * r + 1
-    Q[:, i, l] = (
-        np.prod((i - m_seq) * (l - m_seq), axis=0)
-        / (k + i + l)
-        * tau[:, None, None] ** k
-    )
+    Q[:, i, l] = np.prod((i - m_seq) * (l - m_seq), axis=0) / (k + i + l) * tau[:, None, None] ** k
     return Q
 
 
-def _compute_tvec(n_cfs, r, tau):
+def _compute_tvec(n_cfs: int, r: int, tau: float) -> NDArray[np.float64]:
     tvec = np.zeros(n_cfs)
     n_seq = np.arange(r, n_cfs)
     r_seq = np.arange(0, r)[:, None]

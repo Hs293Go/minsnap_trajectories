@@ -20,6 +20,8 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
 OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 
+import os.path
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -49,12 +51,13 @@ def main():
         refs,
         degree=8,  # Polynomial degree
         idx_minimized_orders=(3, 4),  # Minimize derivatives in these orders (>= 2)
-        num_continuous_orders=3,  # Constrain continuity of derivatives up to order (>= 3)
+        num_continuous_orders=4,  # Constrain continuity through jerk so the waypoint
+        # jerk hint above is honored
         algorithm="closed-form",  # Or "constrained"
     )
 
     t = np.linspace(0, 16, 100)
-    #  Sample up to the 3rd order (acceleration) -----v
+    #  Sample 3 derivative orders (position, velocity, acceleration) -----v
     pva = ms.compute_trajectory_derivatives(polys, t, 3)
     position, *_ = pva
 
@@ -81,9 +84,10 @@ def main():
     ax.set_zlabel("Z (m)")
     ax.legend(loc="upper right")
     fig.tight_layout()
-    try:
-        fig.savefig("example/minsnap_trajectories_example.png")
-    except FileNotFoundError:
+    out_dir = "example"
+    if os.path.isdir(out_dir):
+        fig.savefig(os.path.join(out_dir, "minsnap_trajectories_example.png"))
+    else:
         plt.show()
 
 

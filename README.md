@@ -77,8 +77,8 @@ Generate a piecewise polynomial trajectory using Roy and Bry's closed form solut
 polys = ms.generate_trajectory(
     refs,
     degree=8,  # Polynomial degree
-    idx_minimized_orders=(3, 4),  
-    num_continuous_orders=3,  
+    idx_minimized_orders=(3, 4),
+    num_continuous_orders=4,  # 4 orders: position, velocity, acceleration, jerk
     algorithm="closed-form",  # Or "constrained"
 )
 
@@ -92,11 +92,13 @@ Sample the polynomial trajectory to get position, velocity, acceleration (or hig
 
 ``` python
 t = np.linspace(0, 16, 100)
-#  Sample up to the 3rd order (Jerk) -----v
+#  Sample 3 derivative orders (position, velocity, acceleration) -----v
 pva = ms.compute_trajectory_derivatives(polys, t, 3)
 position = pva[0, ...]
 velocity = pva[1, ...]
 ```
+
+`num_orders` is a count, not an index: pass `4` to also include jerk, `5` for snap, etc.
 
 Or directly generate a quadrotor UAV trajectory
 
@@ -129,3 +131,9 @@ Until more extensive tests are available, use the following parameters in polyno
 - `degree`: From 5 to 15
 - `idx_minimized_orders`: 4 (Minimum snap)
 - `num_continuous_orders`: 3 (Just keep position/velocity/acceleration continuous)
+
+## Migrating to 0.2.0
+
+- Requires Python 3.11+.
+- `Waypoint` is now a frozen dataclass instead of a `dict` subclass. The constructor signature is unchanged, and all of `position`, `velocity`, `acceleration`, `jerk`, `snap`, and `time` are exposed as attributes (previously `jerk` and `snap` were silently dropped from the property accessors). Code that accessed waypoints by dict-key (e.g. `wp[0]`) must switch to attribute access (e.g. `wp.position`).
+- The third positional argument to `compute_trajectory_derivatives` was renamed from `order` to `num_orders` to reflect that it counts derivative orders rather than indexing into them. Positional callers are unaffected.

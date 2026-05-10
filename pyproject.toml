@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "minsnap_trajectories"
-version = "0.1.2"
+version = "0.2.0"
 description = "Simple minimum-snap trajectory generator"
 readme = "README.md"
 authors = [{ name = "H S Helson Go", email = "hei.go@mail.utoronto.ca" }]
-license = { text = "MIT" }
-requires-python = ">=3.8"
+license = "MIT"
+requires-python = ">=3.11"
 keywords = [
   "trajectory generation",
   "path planning",
@@ -18,19 +18,43 @@ keywords = [
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
+  "Typing :: Typed",
+]
+dependencies = ["numpy>=2.4.4", "scipy>=1.17.1"]
+
+[dependency-groups]
+dev = [
+  "hypothesis>=6.152.6",
+  "matplotlib>=3.10.9",
+  "pytest>=9.0.3",
+  "ruff>=0.15.12",
 ]
 
-dependencies = ["numpy", "scipy"]
-optional-dependencies = { "dev" = ["pytest", "black", "isort", "matplotlib"] }
+[project.urls]
+Homepage = "https://github.com/Hs293Go/minsnap_trajectories"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/minsnap_trajectories"]
 
 [tool.pytest.ini_options]
 pythonpath = "src"
 filterwarnings = "ignore::DeprecationWarning"
 
-[tool.isort]
-profile = "black"
+[tool.ruff]
+line-length = 100
+target-version = "py311"
 
-[project.urls]
-Homepage = "https://github.com/Hs293Go/minsnap_trajectories"
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "NPY", "RUF"]
+ignore = [
+  "E741",   # ambiguous variable names (l, I) — common in linear-algebra code
+  "RUF012", # mutable class defaults — not relevant here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
