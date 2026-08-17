@@ -505,7 +505,7 @@ dev = [
     { name = "hypothesis", specifier = ">=6.152.6" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "pytest", specifier = ">=9.0.3" },
-    { name = "ruff", specifier = ">=0.15.12" },
+    { name = "ruff", specifier = ">=0.15.12,<0.16" },
 ]
 
 [[package]]

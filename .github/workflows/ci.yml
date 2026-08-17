@@ -14,9 +14,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-      - run: uv tool install ruff
-      - run: ruff check .
-      - run: ruff format --check .
+      # Use the ruff from uv.lock rather than `uv tool install ruff`, which
+      # floats to the newest release and skews against local runs.
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
 
   test:
     runs-on: ubuntu-latest
