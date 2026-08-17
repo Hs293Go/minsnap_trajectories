@@ -132,6 +132,17 @@ Until more extensive tests are available, use the following parameters in polyno
 - `idx_minimized_orders`: 4 (Minimum snap)
 - `num_continuous_orders`: 3 (Just keep position/velocity/acceleration continuous)
 
+## Migrating to 0.3.0
+
+- Requires Python 3.10+ (previously 3.11+), and the `numpy`/`scipy` floors are
+  low enough to run against the versions Ubuntu 22.04 and ROS 2 Humble ship, so
+  installing no longer replaces a distro-provided `numpy` or `scipy`.
+- The closed-form solver now raises `ValueError` when `degree + 1` is less than
+  `2 * num_continuous_orders`. It previously returned a trajectory that did not
+  pass through its waypoints. Either raise `degree` to at least
+  `2 * num_continuous_orders - 1`, lower `num_continuous_orders`, or use
+  `algorithm="constrained"`, which has no such restriction.
+
 ## Migrating to 0.2.0
 
 - Requires Python 3.11+.
