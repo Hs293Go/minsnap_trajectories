@@ -113,6 +113,21 @@ states, inputs = ms.compute_quadrotor_trajectory(
 )
 ```
 
+## Installing into a ROS 2 / colcon workspace
+
+Just put this package can be dropped into a colcon workspace. The bundled
+`setup.py` lets colcon discover and build it as a plain Python package.
+
+```bash
+colcon build --packages-select minsnap_trajectories
+source install/setup.bash
+```
+
+> [!WARNING]
+> This is not a ROS package: it ships no `package.xml`, so `rosdep` cannot
+> resolve it and it will not appear in `ros2 pkg list`. Colcon matches it by
+> name, which is all a workspace needs in order to vendor it.
+
 ## Limitations
 
 Tests are not nearly enough!
