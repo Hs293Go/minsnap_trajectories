@@ -510,6 +510,19 @@ def _solve_closed_form(
     if r_cts < 3:
         raise ValueError("Trajectory must be continuous up to the 2nd order (acceleration)")
 
+    # The unconstrained reformulation inverts the map from a piece's coefficients to
+    # its 2 * r_cts endpoint derivatives. With fewer coefficients than endpoint
+    # derivatives that map is overdetermined, and the least-squares inverse below
+    # silently yields a trajectory that does not pass through its waypoints.
+    if poly_dim.n_cfs < 2 * r_cts:
+        raise ValueError(
+            f"The closed-form solver needs at least {2 * r_cts} coefficients per piece to "
+            f"reproduce {r_cts} derivative orders at both ends of a piece, but a degree-"
+            f"{poly_dim.n_cfs - 1} polynomial has only {poly_dim.n_cfs}. Raise degree to at "
+            f"least {2 * r_cts - 1}, lower num_continuous_orders, or use "
+            f'algorithm="constrained"'
+        )
+
     if optimize_options is not None:
         warnings.warn(
             "Solving the trajectory generation problem in closed form; "

@@ -226,6 +226,35 @@ def test_idx_minimized_orders_at_degree_raises():
         ms.generate_trajectory(refs, degree=5, idx_minimized_orders=(3, 5))
 
 
+def test_closed_form_rejects_too_low_a_degree():
+    refs = [
+        ms.Waypoint(0.0, np.array([0.0, 0.0, 0.0])),
+        ms.Waypoint(2.0, np.array([2.0, -1.0, 2.0])),
+        ms.Waypoint(4.0, np.array([5.0, 3.0, 4.0])),
+    ]
+    # degree 8 gives 9 coefficients, but 5 continuous orders need 10 endpoint
+    # derivatives per piece. Previously this silently returned a trajectory that
+    # missed every waypoint by ~0.5.
+    with pytest.raises(ValueError, match="closed-form solver needs at least 10"):
+        ms.generate_trajectory(
+            refs, 8, idx_minimized_orders=(2, 3), num_continuous_orders=5, algorithm="closed-form"
+        )
+
+    # One more coefficient is enough, and the trajectory then interpolates exactly.
+    polys = ms.generate_trajectory(
+        refs, 9, idx_minimized_orders=(2, 3), num_continuous_orders=5, algorithm="closed-form"
+    )
+    sampled = ms.compute_trajectory_derivatives(polys, [0.0, 2.0, 4.0], 1)
+    np.testing.assert_allclose(
+        sampled[0], [[0.0, 0.0, 0.0], [2.0, -1.0, 2.0], [5.0, 3.0, 4.0]], atol=1e-9
+    )
+
+    # The constrained solver has no such restriction.
+    ms.generate_trajectory(
+        refs, 8, idx_minimized_orders=(2, 3), num_continuous_orders=5, algorithm="constrained"
+    )
+
+
 def test_yaw_array_input_does_not_raise():
     refs = [
         ms.Waypoint(0.0, np.array([0.0, 0.0, 10.0])),
